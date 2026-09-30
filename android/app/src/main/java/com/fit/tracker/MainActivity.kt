@@ -1,7 +1,11 @@
 package com.fit.tracker
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -25,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,7 +50,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var healthConnectManager: HealthConnectManager
     private lateinit var prefs: SyncPreferences
-    private lateinit var permissionLauncher: ActivityResultLauncher<Set<String>>
+    private var permissionLauncher: ActivityResultLauncher<Set<String>>? = null
 
     // Observable states for UI
     private var isHealthConnectAvailable by mutableStateOf(false)
@@ -53,148 +59,305 @@ class MainActivity : ComponentActivity() {
     private var isSyncing by mutableStateOf(false)
     private var lastSyncStatus by mutableStateOf("Ready")
     private var lastSyncTime by mutableStateOf("Never")
+    private var startupError by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        healthConnectManager = HealthConnectManager(this)
-        prefs = SyncPreferences(this)
-
-        lastSyncStatus = prefs.lastSyncStatus
-        lastSyncTime = prefs.lastSyncTime
-
-        // Register permission contract for Health Connect
-        permissionLauncher = registerForActivityResult(healthConnectManager.createPermissionContract()) { granted ->
-            if (granted.containsAll(healthConnectManager.permissions)) {
-                hasPermissions = true
-                Toast.makeText(this, "Health Connect permissions granted!", Toast.LENGTH_SHORT).show()
-                refreshSteps()
-            } else {
-                hasPermissions = false
-                Toast.makeText(this, "READ_STEPS permission was not granted.", Toast.LENGTH_LONG).show()
-            }
+        // Global uncaught exception handler to prevent silent crash exits
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("FitnessSync", "Uncaught exception on ${thread.name}", throwable)
+            try {
+                SyncPreferences(applicationContext).lastSyncStatus = "Crash: ${throwable.message}"
+            } catch (_: Exception) {}
+            defaultHandler?.uncaughtException(thread, throwable)
         }
 
-        checkInitialState()
+        try {
+            healthConnectManager = HealthConnectManager(this)
+            prefs = SyncPreferences(this)
+
+            lastSyncStatus = prefs.lastSyncStatus
+            lastSyncTime = prefs.lastSyncTime
+
+            // Register permission contract safely
+            val contract = healthConnectManager.createPermissionContract()
+            permissionLauncher = registerForActivityResult(contract) { granted ->
+                try {
+                    if (granted.containsAll(healthConnectManager.permissions)) {
+                        hasPermissions = true
+                        Toast.makeText(this, "Health Connect permissions granted!", Toast.LENGTH_SHORT).show()
+                        refreshSteps()
+                    } else {
+                        hasPermissions = false
+                        Toast.makeText(this, "READ_STEPS permission was not granted.", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: Exception) {
+                    Log.e("FitnessSync", "Error handling permission result", e)
+                }
+            }
+
+            checkInitialState()
+        } catch (t: Throwable) {
+            Log.e("FitnessSync", "Startup failure in onCreate", t)
+            startupError = "${t.javaClass.simpleName}: ${t.message}\n\n${t.stackTraceToString()}"
+        }
 
         setContent {
             MaterialTheme {
-                MainScreen(
-                    isAvailable = isHealthConnectAvailable,
-                    hasPermission = hasPermissions,
-                    steps = todaySteps,
-                    isSyncing = isSyncing,
-                    lastSyncStatus = lastSyncStatus,
-                    lastSyncTime = lastSyncTime,
-                    prefs = prefs,
-                    onInstallHealthConnect = {
-                        try {
-                            startActivity(healthConnectManager.getInstallIntent())
-                        } catch (e: Exception) {
-                            Toast.makeText(this, "Could not open Google Play Store", Toast.LENGTH_SHORT).show()
+                val error = startupError
+                if (error != null) {
+                    DiagnosticErrorScreen(
+                        errorMessage = error,
+                        onRetry = {
+                            startupError = null
+                            recreate()
                         }
-                    },
-                    onRequestPermission = { requestHealthPermissions() },
-                    onRefreshSteps = { refreshSteps() },
-                    onSyncNow = { triggerManualSync() },
-                    onAutoSyncToggled = { enabled ->
-                        prefs.isAutoSyncEnabled = enabled
-                        if (enabled) {
-                            SyncWorker.schedulePeriodicSync(this)
-                            Toast.makeText(this, "Auto background sync enabled", Toast.LENGTH_SHORT).show()
-                        } else {
-                            SyncWorker.cancelPeriodicSync(this)
-                            Toast.makeText(this, "Auto sync disabled", Toast.LENGTH_SHORT).show()
+                    )
+                } else {
+                    MainScreen(
+                        isAvailable = isHealthConnectAvailable,
+                        hasPermission = hasPermissions,
+                        steps = todaySteps,
+                        isSyncing = isSyncing,
+                        lastSyncStatus = lastSyncStatus,
+                        lastSyncTime = lastSyncTime,
+                        prefs = prefs,
+                        onInstallHealthConnect = {
+                            try {
+                                startActivity(healthConnectManager.getInstallIntent())
+                            } catch (e: Exception) {
+                                Toast.makeText(this, "Could not open Google Play Store", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onRequestPermission = { requestHealthPermissions() },
+                        onRefreshSteps = { refreshSteps() },
+                        onSyncNow = { triggerManualSync() },
+                        onAutoSyncToggled = { enabled ->
+                            try {
+                                prefs.isAutoSyncEnabled = enabled
+                                if (enabled) {
+                                    SyncWorker.schedulePeriodicSync(this)
+                                    Toast.makeText(this, "Auto background sync enabled", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    SyncWorker.cancelPeriodicSync(this)
+                                    Toast.makeText(this, "Auto sync disabled", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(this, "WorkManager error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onOpenPrivacyPolicy = {
+                            try {
+                                startActivity(Intent(this, PrivacyPolicyActivity::class.java))
+                            } catch (e: Exception) {
+                                Toast.makeText(this, "Could not open Privacy Policy", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                    },
-                    onOpenPrivacyPolicy = {
-                        startActivity(Intent(this, PrivacyPolicyActivity::class.java))
-                    }
-                )
+                    )
+                }
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        checkInitialState()
+        if (startupError == null && ::healthConnectManager.isInitialized) {
+            checkInitialState()
+        }
     }
 
     private fun checkInitialState() {
-        isHealthConnectAvailable = healthConnectManager.isHealthConnectAvailable()
-        if (isHealthConnectAvailable) {
-            lifecycleScope.launch {
-                hasPermissions = healthConnectManager.hasPermissions()
-                if (hasPermissions) {
-                    refreshSteps()
+        try {
+            isHealthConnectAvailable = healthConnectManager.isHealthConnectAvailable()
+            if (isHealthConnectAvailable) {
+                lifecycleScope.launch {
+                    try {
+                        hasPermissions = healthConnectManager.hasPermissions()
+                        if (hasPermissions) {
+                            refreshSteps()
+                        }
+                    } catch (e: Exception) {
+                        Log.e("FitnessSync", "Failed checking permissions", e)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Log.e("FitnessSync", "Error in checkInitialState", e)
         }
     }
 
     private fun requestHealthPermissions() {
-        permissionLauncher.launch(healthConnectManager.permissions)
+        try {
+            if (!healthConnectManager.isHealthConnectAvailable()) {
+                Toast.makeText(this, "Please install Health Connect on this device first.", Toast.LENGTH_LONG).show()
+                startActivity(healthConnectManager.getInstallIntent())
+                return
+            }
+            permissionLauncher?.launch(healthConnectManager.permissions)
+                ?: Toast.makeText(this, "Permission launcher not ready", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("FitnessSync", "Failed to launch permission intent", e)
+            Toast.makeText(this, "Failed to launch permission screen: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun refreshSteps() {
         lifecycleScope.launch {
-            val result = healthConnectManager.readDailySteps(LocalDate.now())
-            result.onSuccess { steps ->
-                todaySteps = steps
-            }.onFailure { ex ->
-                Toast.makeText(this@MainActivity, "Failed to read steps: ${ex.message}", Toast.LENGTH_SHORT).show()
+            try {
+                val result = healthConnectManager.readDailySteps(LocalDate.now())
+                result.onSuccess { steps ->
+                    todaySteps = steps
+                }.onFailure { ex ->
+                    Toast.makeText(this@MainActivity, "Failed to read steps: ${ex.message}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("FitnessSync", "Error reading steps", e)
             }
         }
     }
 
     private fun triggerManualSync() {
-        if (prefs.webAppUrl.isBlank() || prefs.secretToken.isBlank()) {
+        if (!::prefs.isInitialized || prefs.webAppUrl.isBlank() || prefs.secretToken.isBlank()) {
             Toast.makeText(this, "Please enter both Web App URL and Secret Token in settings (⚙️) first!", Toast.LENGTH_LONG).show()
             return
         }
 
         lifecycleScope.launch {
-            isSyncing = true
-            lastSyncStatus = "Reading steps..."
+            try {
+                isSyncing = true
+                lastSyncStatus = "Reading steps..."
 
-            val today = LocalDate.now()
-            val stepsResult = healthConnectManager.readDailySteps(today)
+                val today = LocalDate.now()
+                val stepsResult = healthConnectManager.readDailySteps(today)
 
-            if (stepsResult.isFailure) {
+                if (stepsResult.isFailure) {
+                    isSyncing = false
+                    val err = stepsResult.exceptionOrNull()?.message ?: "Failed to read steps"
+                    lastSyncStatus = "Error: $err"
+                    Toast.makeText(this@MainActivity, "Sync cancelled: $err", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                todaySteps = stepsResult.getOrThrow()
+                lastSyncStatus = "Syncing to Sheets..."
+
+                val sheetsClient = SheetsSyncClient()
+                val result = sheetsClient.syncSteps(
+                    webAppUrl = prefs.webAppUrl,
+                    apiSecretToken = prefs.secretToken,
+                    date = today,
+                    steps = todaySteps
+                )
+
                 isSyncing = false
-                val err = stepsResult.exceptionOrNull()?.message ?: "Failed to read steps"
-                lastSyncStatus = "Error: $err"
-                Toast.makeText(this@MainActivity, "Sync cancelled: $err", Toast.LENGTH_LONG).show()
-                return@launch
+                val nowTime = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                lastSyncTime = nowTime
+                prefs.lastSyncTime = nowTime
+                prefs.lastSyncSteps = todaySteps
+
+                when (result) {
+                    is SyncResult.Success -> {
+                        lastSyncStatus = "Success (${result.action} row ${result.row})"
+                        prefs.lastSyncStatus = lastSyncStatus
+                        Toast.makeText(this@MainActivity, "Google Sheet updated successfully!", Toast.LENGTH_SHORT).show()
+                    }
+                    is SyncResult.Error -> {
+                        lastSyncStatus = "Failed: ${result.errorMessage}"
+                        prefs.lastSyncStatus = lastSyncStatus
+                        Toast.makeText(this@MainActivity, "Sync failed: ${result.errorMessage}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                isSyncing = false
+                lastSyncStatus = "Sync exception: ${e.message}"
+                Toast.makeText(this@MainActivity, "Sync error: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DiagnosticErrorScreen(
+    errorMessage: String,
+    onRetry: () -> Unit
+) {
+    val context = LocalContext.current
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Fitness Sync - Diagnostic Log") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onErrorContainer
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Startup Diagnostic Notice", fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "The app encountered an initial exception. The complete error details are captured below:",
+                        fontSize = 13.sp
+                    )
+                }
             }
 
-            todaySteps = stepsResult.getOrThrow()
-            lastSyncStatus = "Syncing to Sheets..."
-
-            val sheetsClient = SheetsSyncClient()
-            val result = sheetsClient.syncSteps(
-                webAppUrl = prefs.webAppUrl,
-                apiSecretToken = prefs.secretToken,
-                date = today,
-                steps = todaySteps
-            )
-
-            isSyncing = false
-            val nowTime = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-            lastSyncTime = nowTime
-            prefs.lastSyncTime = nowTime
-            prefs.lastSyncSteps = todaySteps
-
-            when (result) {
-                is SyncResult.Success -> {
-                    lastSyncStatus = "Success (${result.action} row ${result.row})"
-                    prefs.lastSyncStatus = lastSyncStatus
-                    Toast.makeText(this@MainActivity, "Google Sheet updated successfully!", Toast.LENGTH_SHORT).show()
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = errorMessage,
+                        modifier = Modifier.padding(12.dp),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = Color.DarkGray
+                    )
                 }
-                is SyncResult.Error -> {
-                    lastSyncStatus = "Failed: ${result.errorMessage}"
-                    prefs.lastSyncStatus = lastSyncStatus
-                    Toast.makeText(this@MainActivity, "Sync failed: ${result.errorMessage}", Toast.LENGTH_LONG).show()
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("Fitness Sync Diagnostic", errorMessage)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(context, "Copied error log to clipboard!", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy Log")
+                }
+                OutlinedButton(
+                    onClick = onRetry,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Retry")
                 }
             }
         }

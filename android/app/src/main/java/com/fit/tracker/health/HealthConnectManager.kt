@@ -1,6 +1,7 @@
 package com.fit.tracker.health
 
 import android.content.Context
+import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.HealthConnectFeatures
@@ -16,15 +17,20 @@ import java.time.ZoneId
 
 /**
  * HealthConnectManager: Wrapper around Android Health Connect Jetpack SDK.
- * Handles SDK availability checking, background read permission, and aggregated step querying.
+ * Handles SDK availability checking, background read permission, and aggregated step querying defensively.
  */
 class HealthConnectManager(private val context: Context) {
 
-    // Obtain the HealthConnectClient instance
+    // Obtain the HealthConnectClient instance defensively
     val healthConnectClient: HealthConnectClient? by lazy {
-        if (isHealthConnectAvailable()) {
-            HealthConnectClient.getOrCreate(context)
-        } else {
+        try {
+            if (isHealthConnectAvailable()) {
+                HealthConnectClient.getOrCreate(context)
+            } else {
+                null
+            }
+        } catch (e: Throwable) {
+            e.printStackTrace()
             null
         }
     }
@@ -33,10 +39,14 @@ class HealthConnectManager(private val context: Context) {
      * Checks if the device supports reading health data in the background (WorkManager).
      */
     fun isBackgroundReadSupported(): Boolean {
-        val client = healthConnectClient ?: return false
-        return client.features.getFeatureStatus(
-            HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND
-        ) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+        return try {
+            val client = healthConnectClient ?: return false
+            client.features.getFeatureStatus(
+                HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND
+            ) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     /**
@@ -59,7 +69,11 @@ class HealthConnectManager(private val context: Context) {
      * On Android 9-13, it uses the Google Health Connect Play Store app.
      */
     fun getSdkStatus(): Int {
-        return HealthConnectClient.getSdkStatus(context)
+        return try {
+            HealthConnectClient.getSdkStatus(context)
+        } catch (e: Throwable) {
+            HealthConnectClient.SDK_UNAVAILABLE
+        }
     }
 
     fun isHealthConnectAvailable(): Boolean {
@@ -69,9 +83,9 @@ class HealthConnectManager(private val context: Context) {
     /**
      * Intent to open the Google Play Store to install or update Health Connect (for Android 9-13).
      */
-    fun getInstallIntent(): android.content.Intent {
+    fun getInstallIntent(): Intent {
         val uriString = "market://details?id=com.google.android.apps.healthdata&url=healthconnect%3A%2F%2Fonboarding"
-        return android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+        return Intent(Intent.ACTION_VIEW).apply {
             data = android.net.Uri.parse(uriString)
             setPackage("com.android.vending")
             putExtra("overlay", true)
@@ -83,34 +97,46 @@ class HealthConnectManager(private val context: Context) {
      * Check if user has already granted required Health Connect permissions
      */
     suspend fun hasPermissions(): Boolean {
-        val client = healthConnectClient ?: return false
-        val granted = client.permissionController.getGrantedPermissions()
-        // Ensure at least READ_STEPS is granted
-        val hasReadSteps = granted.contains(HealthPermission.getReadPermission(StepsRecord::class))
-        return hasReadSteps
+        return try {
+            val client = healthConnectClient ?: return false
+            val granted = client.permissionController.getGrantedPermissions()
+            granted.contains(HealthPermission.getReadPermission(StepsRecord::class))
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     suspend fun hasBackgroundPermission(): Boolean {
-        val client = healthConnectClient ?: return false
-        if (!isBackgroundReadSupported()) return true
-        val granted = client.permissionController.getGrantedPermissions()
-        return granted.contains(HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND)
+        return try {
+            val client = healthConnectClient ?: return false
+            if (!isBackgroundReadSupported()) return true
+            val granted = client.permissionController.getGrantedPermissions()
+            granted.contains(HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND)
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     /**
      * Creates the ActivityResultContract for requesting Health Connect permissions
      */
     fun createPermissionContract(): ActivityResultContract<Set<String>, Set<String>> {
-        return PermissionController.createRequestPermissionResultContract()
+        return try {
+            PermissionController.createRequestPermissionResultContract()
+        } catch (e: Throwable) {
+            object : ActivityResultContract<Set<String>, Set<String>>() {
+                override fun createIntent(context: Context, input: Set<String>): Intent {
+                    return Intent()
+                }
+                override fun parseResult(resultCode: Int, intent: Intent?): Set<String> {
+                    return emptySet()
+                }
+            }
+        }
     }
 
     /**
      * Reads aggregated daily steps for a specific local calendar date.
-     * 
-     * CRITICAL FIX:
-     * Returns Result<Long> rather than swallowing errors and returning 0L.
-     * If an error occurs (permission missing, database error, timeout), we must NOT
-     * return 0, because writing 0 to Google Sheets would erase the user's legitimate steps!
      */
     suspend fun readDailySteps(date: LocalDate): Result<Long> {
         val client = healthConnectClient
@@ -133,7 +159,6 @@ class HealthConnectManager(private val context: Context) {
                     timeRangeFilter = TimeRangeFilter.between(startTime, endTime)
                 )
             )
-            // Legitimate step count (could be 0 if the user truly rested all day)
             val steps = response[StepsRecord.COUNT_TOTAL] ?: 0L
             Result.success(steps)
         } catch (e: Exception) {

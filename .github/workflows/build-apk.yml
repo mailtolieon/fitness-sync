@@ -51,8 +51,8 @@ jobs:
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
         with:
           files: android/app/build/outputs/apk/debug/app-debug.apk
-          tag_name: v1.0.0
-          name: Fitness Sync App v1.0.0 (Health Connect)
+          tag_name: v1.0.1
+          name: Fitness Sync App v1.0.1 (Health Connect)
           body: |
             ### 🏃‍♂️ Fitness Sync Android APK (Health Connect to Google Sheets)
             - Download `app-debug.apk` below directly to your Android device.
