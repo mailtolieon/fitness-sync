@@ -262,7 +262,7 @@ fun MainScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertAlignment
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = if (isAvailable && hasPermission) Icons.Default.CheckCircle else Icons.Default.Warning,
@@ -313,9 +313,9 @@ fun MainScreen(
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertAlignment
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertAlignment) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.DirectionsWalk, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
@@ -408,7 +408,7 @@ fun MainScreen(
                         .fillMaxWidth()
                         .padding(16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertAlignment
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Automatic Daily Sync", fontWeight = FontWeight.Bold, fontSize = 14.sp)
