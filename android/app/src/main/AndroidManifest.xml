@@ -40,6 +40,7 @@
             <!-- Intent filter required by Health Connect to show app rationale/details -->
             <intent-filter>
                 <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
@@ -51,9 +52,9 @@
 
         <!-- Activity alias with START_VIEW_PERMISSION_USAGE required on Android 14+ -->
         <activity-alias
-            android:name=".ViewPermissionUsageActivity"
+            android:name="ViewPermissionUsageActivity"
             android:exported="true"
-            android:targetActivity=".ui.PrivacyPolicyActivity"
+            android:targetActivity=".MainActivity"
             android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
