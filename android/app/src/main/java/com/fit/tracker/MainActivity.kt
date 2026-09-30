@@ -326,15 +326,13 @@ fun DiagnosticErrorScreen(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                SelectionContainer {
-                    Text(
-                        text = errorMessage,
-                        modifier = Modifier.padding(12.dp),
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        color = Color.DarkGray
-                    )
-                }
+                Text(
+                    text = errorMessage,
+                    modifier = Modifier.padding(12.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = Color.DarkGray
+                )
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
