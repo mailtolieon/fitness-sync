@@ -22,10 +22,15 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Android SDK Platform 36
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" || true
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '8.11.1'
 
       - name: Build Debug APK
         working-directory: ./android
