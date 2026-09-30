@@ -7,7 +7,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.compose.animation.AnimatedVisibility
@@ -46,7 +46,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var healthConnectManager: HealthConnectManager
     private lateinit var prefs: SyncPreferences
@@ -62,19 +62,12 @@ class MainActivity : ComponentActivity() {
     private var startupError by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        // Global uncaught exception handler to prevent silent crash exits
-        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            Log.e("FitnessSync", "Uncaught exception on ${thread.name}", throwable)
-            try {
-                SyncPreferences(applicationContext).lastSyncStatus = "Crash: ${throwable.message}"
-            } catch (_: Exception) {}
-            defaultHandler?.uncaughtException(thread, throwable)
-        }
+        // First install uncaught crash handler to launch CrashReportActivity instead of system popup
+        installGlobalCrashHandler()
 
         try {
+            super.onCreate(savedInstanceState)
+
             healthConnectManager = HealthConnectManager(this)
             prefs = SyncPreferences(this)
 
@@ -82,40 +75,30 @@ class MainActivity : ComponentActivity() {
             lastSyncTime = prefs.lastSyncTime
 
             // Register permission contract safely
-            val contract = healthConnectManager.createPermissionContract()
-            permissionLauncher = registerForActivityResult(contract) { granted ->
-                try {
-                    if (granted.containsAll(healthConnectManager.permissions)) {
-                        hasPermissions = true
-                        Toast.makeText(this, "Health Connect permissions granted!", Toast.LENGTH_SHORT).show()
-                        refreshSteps()
-                    } else {
-                        hasPermissions = false
-                        Toast.makeText(this, "READ_STEPS permission was not granted.", Toast.LENGTH_LONG).show()
+            try {
+                val contract = healthConnectManager.createPermissionContract()
+                permissionLauncher = registerForActivityResult(contract) { granted ->
+                    try {
+                        if (granted.containsAll(healthConnectManager.permissions)) {
+                            hasPermissions = true
+                            Toast.makeText(this, "Health Connect permissions granted!", Toast.LENGTH_SHORT).show()
+                            refreshSteps()
+                        } else {
+                            hasPermissions = false
+                            Toast.makeText(this, "READ_STEPS permission was not granted.", Toast.LENGTH_LONG).show()
+                        }
+                    } catch (e: Exception) {
+                        Log.e("FitnessSync", "Error handling permission result", e)
                     }
-                } catch (e: Exception) {
-                    Log.e("FitnessSync", "Error handling permission result", e)
                 }
+            } catch (e: Throwable) {
+                Log.e("FitnessSync", "Failed to register permission contract", e)
             }
 
             checkInitialState()
-        } catch (t: Throwable) {
-            Log.e("FitnessSync", "Startup failure in onCreate", t)
-            startupError = "${t.javaClass.simpleName}: ${t.message}\n\n${t.stackTraceToString()}"
-        }
 
-        setContent {
-            MaterialTheme {
-                val error = startupError
-                if (error != null) {
-                    DiagnosticErrorScreen(
-                        errorMessage = error,
-                        onRetry = {
-                            startupError = null
-                            recreate()
-                        }
-                    )
-                } else {
+            setContent {
+                MaterialTheme {
                     MainScreen(
                         isAvailable = isHealthConnectAvailable,
                         hasPermission = hasPermissions,
@@ -158,13 +141,107 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        } catch (t: Throwable) {
+            Log.e("FitnessSync", "Startup failure in onCreate", t)
+            showNativeFallbackScreen(t)
         }
+    }
+
+    private fun installGlobalCrashHandler() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("FitnessSync", "Uncaught exception on thread ${thread.name}", throwable)
+            try {
+                SyncPreferences(applicationContext).lastSyncStatus = "Crash: ${throwable.message}"
+            } catch (_: Exception) {}
+
+            try {
+                val intent = Intent(applicationContext, CrashReportActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                    putExtra("error_details", "${throwable.javaClass.name}: ${throwable.message}\n\n${throwable.stackTraceToString()}")
+                }
+                startActivity(intent)
+                android.os.Process.killProcess(android.os.Process.myPid())
+                System.exit(10)
+            } catch (e: Throwable) {
+                defaultHandler?.uncaughtException(thread, throwable)
+            }
+        }
+    }
+
+    private fun showNativeFallbackScreen(throwable: Throwable) {
+        val errorText = "${throwable.javaClass.name}: ${throwable.message}\n\nStack Trace:\n${throwable.stackTraceToString()}"
+
+        val rootLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(40, 60, 40, 40)
+            setBackgroundColor(android.graphics.Color.WHITE)
+        }
+
+        val title = android.widget.TextView(this).apply {
+            text = "Fitness Sync - Diagnostic Notice"
+            textSize = 20f
+            setTextColor(android.graphics.Color.parseColor("#D32F2F"))
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 16)
+        }
+
+        val desc = android.widget.TextView(this).apply {
+            text = "An exception prevented normal screen loading. The diagnostic details are captured below. Please copy them and share with the developer:"
+            textSize = 14f
+            setTextColor(android.graphics.Color.parseColor("#333333"))
+            setPadding(0, 0, 0, 20)
+        }
+
+        val copyBtn = android.widget.Button(this).apply {
+            text = "📋 Copy Diagnostic Error"
+            setBackgroundColor(android.graphics.Color.parseColor("#1A73E8"))
+            setTextColor(android.graphics.Color.WHITE)
+            setOnClickListener {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("Fitness Sync Diagnostic", errorText)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(this@MainActivity, "Copied error log to clipboard!", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        val retryBtn = android.widget.Button(this).apply {
+            text = "🔄 Retry App Launch"
+            setOnClickListener { recreate() }
+        }
+
+        val errorView = android.widget.TextView(this).apply {
+            text = errorText
+            textSize = 11f
+            setTextColor(android.graphics.Color.parseColor("#212121"))
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(24, 24, 24, 24)
+            setBackgroundColor(android.graphics.Color.parseColor("#F5F5F5"))
+        }
+
+        val scroll = android.widget.ScrollView(this).apply {
+            addView(errorView)
+        }
+
+        rootLayout.addView(title)
+        rootLayout.addView(desc)
+        rootLayout.addView(copyBtn)
+        rootLayout.addView(android.widget.Space(this).apply { minimumHeight = 12 })
+        rootLayout.addView(retryBtn)
+        rootLayout.addView(android.widget.Space(this).apply { minimumHeight = 20 })
+        rootLayout.addView(scroll)
+
+        setContentView(rootLayout)
     }
 
     override fun onResume() {
         super.onResume()
-        if (startupError == null && ::healthConnectManager.isInitialized) {
-            checkInitialState()
+        try {
+            if (::healthConnectManager.isInitialized) {
+                checkInitialState()
+            }
+        } catch (e: Throwable) {
+            Log.e("FitnessSync", "Error in onResume", e)
         }
     }
 

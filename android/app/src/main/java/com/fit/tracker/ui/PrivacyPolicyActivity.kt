@@ -1,7 +1,7 @@
 package com.fit.tracker.ui
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -26,7 +26,7 @@ import androidx.compose.ui.unit.dp
  * PrivacyPolicyActivity: Displays Health Connect data usage policy.
  * Health Connect guidelines mandate an in-app privacy policy screen.
  */
-class PrivacyPolicyActivity : ComponentActivity() {
+class PrivacyPolicyActivity : AppCompatActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
