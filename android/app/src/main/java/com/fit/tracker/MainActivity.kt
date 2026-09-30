@@ -569,15 +569,19 @@ fun MainScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    val formattedSteps = java.text.NumberFormat.getIntegerInstance().format(steps)
+                    val formattedTarget = java.text.NumberFormat.getIntegerInstance().format(stepTarget)
+                    val percent = (progress * 100).toInt()
+
                     Text(
-                        text = "%,d".format(steps),
+                        text = formattedSteps,
                         fontSize = 42.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
 
                     Text(
-                        text = "Goal: %,d steps (${(progress * 100).toInt()}%)".format(stepTarget),
+                        text = "Goal: $formattedTarget steps ($percent%)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color.Gray
                     )
