@@ -1,0 +1,57 @@
+name: Build Android Fitness Sync APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug APK
+        working-directory: ./android
+        run: |
+          gradle assembleDebug --stacktrace
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FitnessSync-app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Create GitHub Release with APK Download
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        with:
+          files: android/app/build/outputs/apk/debug/app-debug.apk
+          tag_name: v1.0.0
+          name: Fitness Sync App v1.0.0 (Health Connect)
+          body: |
+            ### 🏃‍♂️ Fitness Sync Android APK (Health Connect to Google Sheets)
+            - Download `app-debug.apk` below directly to your Android device.
+            - Open and tap Install.
+            - Enter your Web App URL and API Secret Token in Settings (⚙️).
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,487 @@
+package com.fit.tracker
+
+import android.content.Intent
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
+import com.fit.tracker.data.SyncPreferences
+import com.fit.tracker.health.HealthConnectManager
+import com.fit.tracker.network.SheetsSyncClient
+import com.fit.tracker.network.SyncResult
+import com.fit.tracker.sync.SyncWorker
+import com.fit.tracker.ui.PrivacyPolicyActivity
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
+class MainActivity : ComponentActivity() {
+
+    private lateinit var healthConnectManager: HealthConnectManager
+    private lateinit var prefs: SyncPreferences
+    private lateinit var permissionLauncher: ActivityResultLauncher<Set<String>>
+
+    // Observable states for UI
+    private var isHealthConnectAvailable by mutableStateOf(false)
+    private var hasPermissions by mutableStateOf(false)
+    private var todaySteps by mutableStateOf(0L)
+    private var isSyncing by mutableStateOf(false)
+    private var lastSyncStatus by mutableStateOf("Ready")
+    private var lastSyncTime by mutableStateOf("Never")
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        healthConnectManager = HealthConnectManager(this)
+        prefs = SyncPreferences(this)
+
+        lastSyncStatus = prefs.lastSyncStatus
+        lastSyncTime = prefs.lastSyncTime
+
+        // Register permission contract for Health Connect
+        permissionLauncher = registerForActivityResult(healthConnectManager.createPermissionContract()) { granted ->
+            if (granted.containsAll(healthConnectManager.permissions)) {
+                hasPermissions = true
+                Toast.makeText(this, "Health Connect permissions granted!", Toast.LENGTH_SHORT).show()
+                refreshSteps()
+            } else {
+                hasPermissions = false
+                Toast.makeText(this, "READ_STEPS permission was not granted.", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        checkInitialState()
+
+        setContent {
+            MaterialTheme {
+                MainScreen(
+                    isAvailable = isHealthConnectAvailable,
+                    hasPermission = hasPermissions,
+                    steps = todaySteps,
+                    isSyncing = isSyncing,
+                    lastSyncStatus = lastSyncStatus,
+                    lastSyncTime = lastSyncTime,
+                    prefs = prefs,
+                    onInstallHealthConnect = {
+                        try {
+                            startActivity(healthConnectManager.getInstallIntent())
+                        } catch (e: Exception) {
+                            Toast.makeText(this, "Could not open Google Play Store", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onRequestPermission = { requestHealthPermissions() },
+                    onRefreshSteps = { refreshSteps() },
+                    onSyncNow = { triggerManualSync() },
+                    onAutoSyncToggled = { enabled ->
+                        prefs.isAutoSyncEnabled = enabled
+                        if (enabled) {
+                            SyncWorker.schedulePeriodicSync(this)
+                            Toast.makeText(this, "Auto background sync enabled", Toast.LENGTH_SHORT).show()
+                        } else {
+                            SyncWorker.cancelPeriodicSync(this)
+                            Toast.makeText(this, "Auto sync disabled", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onOpenPrivacyPolicy = {
+                        startActivity(Intent(this, PrivacyPolicyActivity::class.java))
+                    }
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkInitialState()
+    }
+
+    private fun checkInitialState() {
+        isHealthConnectAvailable = healthConnectManager.isHealthConnectAvailable()
+        if (isHealthConnectAvailable) {
+            lifecycleScope.launch {
+                hasPermissions = healthConnectManager.hasPermissions()
+                if (hasPermissions) {
+                    refreshSteps()
+                }
+            }
+        }
+    }
+
+    private fun requestHealthPermissions() {
+        permissionLauncher.launch(healthConnectManager.permissions)
+    }
+
+    private fun refreshSteps() {
+        lifecycleScope.launch {
+            val result = healthConnectManager.readDailySteps(LocalDate.now())
+            result.onSuccess { steps ->
+                todaySteps = steps
+            }.onFailure { ex ->
+                Toast.makeText(this@MainActivity, "Failed to read steps: ${ex.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun triggerManualSync() {
+        if (prefs.webAppUrl.isBlank() || prefs.secretToken.isBlank()) {
+            Toast.makeText(this, "Please enter both Web App URL and Secret Token in settings (⚙️) first!", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        lifecycleScope.launch {
+            isSyncing = true
+            lastSyncStatus = "Reading steps..."
+
+            val today = LocalDate.now()
+            val stepsResult = healthConnectManager.readDailySteps(today)
+
+            if (stepsResult.isFailure) {
+                isSyncing = false
+                val err = stepsResult.exceptionOrNull()?.message ?: "Failed to read steps"
+                lastSyncStatus = "Error: $err"
+                Toast.makeText(this@MainActivity, "Sync cancelled: $err", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+
+            todaySteps = stepsResult.getOrThrow()
+            lastSyncStatus = "Syncing to Sheets..."
+
+            val sheetsClient = SheetsSyncClient()
+            val result = sheetsClient.syncSteps(
+                webAppUrl = prefs.webAppUrl,
+                apiSecretToken = prefs.secretToken,
+                date = today,
+                steps = todaySteps
+            )
+
+            isSyncing = false
+            val nowTime = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+            lastSyncTime = nowTime
+            prefs.lastSyncTime = nowTime
+            prefs.lastSyncSteps = todaySteps
+
+            when (result) {
+                is SyncResult.Success -> {
+                    lastSyncStatus = "Success (${result.action} row ${result.row})"
+                    prefs.lastSyncStatus = lastSyncStatus
+                    Toast.makeText(this@MainActivity, "Google Sheet updated successfully!", Toast.LENGTH_SHORT).show()
+                }
+                is SyncResult.Error -> {
+                    lastSyncStatus = "Failed: ${result.errorMessage}"
+                    prefs.lastSyncStatus = lastSyncStatus
+                    Toast.makeText(this@MainActivity, "Sync failed: ${result.errorMessage}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MainScreen(
+    isAvailable: Boolean,
+    hasPermission: Boolean,
+    steps: Long,
+    isSyncing: Boolean,
+    lastSyncStatus: String,
+    lastSyncTime: String,
+    prefs: SyncPreferences,
+    onInstallHealthConnect: () -> Unit,
+    onRequestPermission: () -> Unit,
+    onRefreshSteps: () -> Unit,
+    onSyncNow: () -> Unit,
+    onAutoSyncToggled: (Boolean) -> Unit,
+    onOpenPrivacyPolicy: () -> Unit
+) {
+    var webAppUrl by remember { mutableStateOf(prefs.webAppUrl) }
+    var secretToken by remember { mutableStateOf(prefs.secretToken) }
+    var autoSyncEnabled by remember { mutableStateOf(prefs.isAutoSyncEnabled) }
+    var showSettings by remember { mutableStateOf(false) }
+
+    val stepTarget = 10000L
+    val progress = (steps.toFloat() / stepTarget).coerceIn(0f, 1f)
+    val context = LocalContext.current
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Fitness Sync (Health Connect)") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ),
+                actions = {
+                    IconButton(onClick = { showSettings = !showSettings }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Health Connect Status Card
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isAvailable && hasPermission) Color(0xFFE8F5E9) else Color(0xFFFFF3E0)
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertAlignment
+                ) {
+                    Icon(
+                        imageVector = if (isAvailable && hasPermission) Icons.Default.CheckCircle else Icons.Default.Warning,
+                        contentDescription = "Status",
+                        tint = if (isAvailable && hasPermission) Color(0xFF2E7D32) else Color(0xFFE65100)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (!isAvailable) "Health Connect Not Available"
+                            else if (!hasPermission) "Permission Required"
+                            else "Health Connect Connected",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = if (!isAvailable) "Please install Health Connect on this device (Android 9-13)."
+                            else if (!hasPermission) "Tap 'Grant Access' to allow reading your daily steps."
+                            else "Ready to read aggregated steps.",
+                            fontSize = 13.sp,
+                            color = Color.DarkGray
+                        )
+                    }
+                    if (!isAvailable) {
+                        Button(onClick = onInstallHealthConnect) {
+                            Text("Install")
+                        }
+                    } else if (!hasPermission) {
+                        Button(onClick = onRequestPermission) {
+                            Text("Grant")
+                        }
+                    }
+                }
+            }
+
+            // Today's Steps Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertAlignment
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertAlignment) {
+                            Icon(Icons.Default.DirectionsWalk, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Today's Steps",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        IconButton(onClick = onRefreshSteps) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "%,d".format(steps),
+                        fontSize = 42.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    Text(
+                        text = "Goal: %,d steps (${(progress * 100).toInt()}%)".format(stepTarget),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.Gray
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(10.dp),
+                        color = if (progress >= 1.0f) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
+                        trackColor = Color(0xFFE0E0E0),
+                    )
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    // Sync Button
+                    Button(
+                        onClick = onSyncNow,
+                        enabled = !isSyncing && hasPermission,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        if (isSyncing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text("Syncing to Google Sheets...")
+                        } else {
+                            Icon(Icons.Default.Sync, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Sync Now to Google Sheet")
+                        }
+                    }
+                }
+            }
+
+            // Sync Status & Info
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Sync Status",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Last Status: $lastSyncStatus", fontSize = 13.sp)
+                    Text("Last Synced At: $lastSyncTime", fontSize = 13.sp, color = Color.Gray)
+                }
+            }
+
+            // Auto-sync Toggle Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertAlignment
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Automatic Daily Sync", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text(
+                            "WorkManager syncs your steps in the background whenever network is available.",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    Switch(
+                        checked = autoSyncEnabled,
+                        onCheckedChange = {
+                            autoSyncEnabled = it
+                            onAutoSyncToggled(it)
+                        }
+                    )
+                }
+            }
+
+            // Settings Card (Collapsible)
+            AnimatedVisibility(visible = showSettings) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "Connection Settings",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        OutlinedTextField(
+                            value = webAppUrl,
+                            onValueChange = { webAppUrl = it },
+                            label = { Text("Google Apps Script Web App URL") },
+                            placeholder = { Text("https://script.google.com/macros/s/.../exec") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = secretToken,
+                            onValueChange = { secretToken = it },
+                            label = { Text("Secret Token") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Button(
+                            onClick = {
+                                prefs.webAppUrl = webAppUrl.trim()
+                                prefs.secretToken = secretToken.trim()
+                                Toast.makeText(context, "Settings saved!", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Save Settings")
+                        }
+                    }
+                }
+            }
+
+            // Footer link
+            TextButton(
+                onClick = onOpenPrivacyPolicy,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            ) {
+                Text("Health Connect Privacy Policy & Details", fontSize = 12.sp)
+            }
+        }
+    }
+}
